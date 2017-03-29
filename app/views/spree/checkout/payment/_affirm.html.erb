@@ -149,13 +149,19 @@
             handle continue button clicks with .open()
         \*****************************************************/
         $('#checkout_form_payment').submit(function(e){
-          var checkedPaymentMethod = $('div[data-hook="checkout_payment_step"] input[type="radio"]:checked').val();
+          var selectedPaymentMethod = $('input[name="order[payments_attributes][][payment_method_id]"]');
+          var type = selectedPaymentMethod.attr("type");
+          if (type && type.toLowerCase() == 'radio') {
+            selectedPaymentMethod = selectedPaymentMethod.filter(":checked").val();
+          } else {
+            selectedPaymentMethod = selectedPaymentMethod.val();
+          }
 
-          if (window.AffirmPaymentMethods[checkedPaymentMethod]) {
+          if (window.AffirmPaymentMethods[selectedPaymentMethod]) {
             var $submit_button = $(this).find("input[type='submit']");
 
             // update with checkout method details
-            affirm.checkout(window.AffirmPaymentMethods[checkedPaymentMethod]);
+            affirm.checkout(window.AffirmPaymentMethods[selectedPaymentMethod]);
 
             // show the loading message
             $submit_button.trigger("loading");
