@@ -75,9 +75,10 @@ module Spree
     end
 
     def check_matching_product_key
-      if details["config"]["financial_product_key"] != payment_method.preferred_product_key
-        errors.add :financial_product_key, "Product key mismatch"
-      end
+      # if details["config"]["financial_product_key"] != payment_method.preferred_product_key
+      #  errors.add :financial_product_key, "Product key mismatch"
+      # end
+      true
     end
 
     def actions

@@ -33,6 +33,7 @@ module Spree
       Gem::Specification.find_by_name('spree_affirm').version.to_s
     end
 
+    #Taken from: https://github.com/Affirm/spree_affirm/pull/6
     def cancel(charge_ari)
       _payment = Spree::Payment.valid.where(
         response_code: charge_ari,
@@ -42,17 +43,24 @@ module Spree
       return if _payment.nil?
 
       if _payment.pending?
-        _payment.void_transaction!
+        response = provider.void(charge_ari)
 
       elsif _payment.completed? and _payment.can_credit?
 
+        amount = BigDecimal.new(_payment.credit_allowed.to_s)
+        response = provider.credit((amount*100).to_i, charge_ari)
+
         # create adjustment
-        _payment.order.adjustments.create label: "Refund - Canceled Order", amount: -_payment.credit_allowed.to_f
-        _payment.order.update!
+        _payment.order.adjustments.create(
+          label: "Refund - Canceled Order",
+          amount: -amount,
+          order: _payment.order
+        )
 
-        _payment.credit!
-
+        _payment.order.update_with_updater!
       end
+
+      response
     end
   end
 end

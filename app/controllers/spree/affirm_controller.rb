@@ -2,70 +2,44 @@ module Spree
   class AffirmController < Spree::StoreController
     helper 'spree/orders'
 
-    #the confirm will do it's own protection by making calls to affirm
-    protect_from_forgery :except => [:confirm]
+    before_action :redirect_to_current_state, only: :confirm, if: -> { !params[:checkout_token] }
+    before_action :redirect_to_completion, only: :confirm, if: -> { current_order.complete? }
+
+    protect_from_forgery except: :confirm
 
     def confirm
-      order = current_order || raise(ActiveRecord::RecordNotFound)
-
-      if !params[:checkout_token]
-        flash[:notice] = "Invalid order confirmation data."
-        return redirect_to checkout_state_path(current_order.state)
-      end
-
-      if order.complete?
-        flash[:notice] = "Order already completed."
-        return redirect_to completion_route order
-      end
-
-      _affirm_checkout = Spree::AffirmCheckout.new(
-        order: order,
-        token: params[:checkout_token],
-        payment_method: payment_method
-      )
-
-      # check if data needs to be updated
-      unless _affirm_checkout.valid?
-
-        _affirm_checkout.errors.each do |field, error|
+      unless affirm_checkout.valid?
+        affirm_checkout.errors.each do |field, error|
           case field
           when :billing_address
-            # FIXME(brian): pass the phone number to the |order| in a better place
             phone = order.bill_address.phone
-            order.bill_address = generate_spree_address(_affirm_checkout.details['billing'])
+            order.bill_address = generate_spree_address(affirm_checkout.details['billing'])
             order.bill_address.phone = phone
 
           when :shipping_address
-            # FIXME(brian): pass the phone number to the |order| in a better place
             phone = order.shipping_address.phone
-            order.ship_address = generate_spree_address(_affirm_checkout.details['shipping'])
+            order.ship_address = generate_spree_address(affirm_checkout.details['shipping'])
             order.ship_address.phone = phone
 
           when :billing_email
-            order.email = _affirm_checkout.details["billing"]["email"]
-
+            order.email = affirm_checkout.details["billing"]["email"]
           end
         end
 
         order.save
       end
 
-      _affirm_checkout.save
+      affirm_checkout.save
 
-      _affirm_payment = order.payments.create!({
-        payment_method: payment_method,
-        amount: order.total,
-        source: _affirm_checkout
-      })
+      create_affirm_payment
 
-      # transition to confirm or complete
       while order.next; end
 
       if order.completed?
         session[:order_id] = nil
         flash.notice = Spree.t(:order_processed_successfully)
-        flash[:commerce_tracking] = "nothing special"
-        redirect_to completion_route order
+        flash['order_completed'] = true
+        redirect_to completion_route
       else
         redirect_to checkout_state_path(order.state)
       end
@@ -77,51 +51,80 @@ module Spree
 
     private
 
+    def redirect_to_current_state
+      flash[:notice] = "Invalid order confirmation data."
+      return redirect_to checkout_state_path(current_order.state)
+    end
+
+    def redirect_to_completion
+      flash[:notice] = "Order already completed."
+      return redirect_to completion_route
+    end
+
+    def affirm_checkout
+      @affirm_checkout ||= Spree::AffirmCheckout.new(
+        order: order,
+        token: params[:checkout_token],
+        payment_method: payment_method
+      )
+    end
+
     def payment_method
-      Spree::PaymentMethod.find(params[:payment_method_id])
+      @payment_method ||= Spree::PaymentMethod.find(params[:payment_method_id])
     end
 
-    def provider
-      payment_method.provider
+    def order
+      @order ||= current_order
     end
 
-    def completion_route(order)
-      spree.order_path(order)
+    def create_affirm_payment
+      order.payments.create!({
+        payment_method: payment_method,
+        amount: order.total,
+        source: affirm_checkout
+      })
     end
 
-    def generate_spree_address(affirm_address)
-      # find the state and country in spree
-      _state    = Spree::State.find_by_abbr(affirm_address["address"]["region1_code"]) or
-                  Spree::State.find_by_name(affirm_address["address"]["region1_code"])
-      _country  = Spree::Country.find_by_iso3(affirm_address["address"]["country_code"]) or
-                  Spree::Country.find_by_iso(affirm_address["address"]["country_code"])
+    def find_country(address)
+      country_code = address["address"]["country_code"]
+      Spree::Country.find_by(iso3: country_code) || Spree::Country.find_by(iso: country_code)
+    end
 
-      # try to get the name from first and last
-      _firstname = affirm_address["name"]["first"] if affirm_address["name"]["first"].present?
-      _lastname  = affirm_address["name"]["last"]  if affirm_address["name"]["last"].present?
+    def find_state(address)
+      country = find_country(address)
+      region_code = address["address"]["region1_code"]
+      country.states.find_by(abbr: region_code) || country.states.find_by(name: region_code)
+    end
 
-      # fall back to using the full name if available
-      if _firstname.nil? and _lastname.nil? and affirm_address["name"]["full"].present?
-        _name_parts = affirm_address["name"]["full"].split " "
-        _lastname   = _name_parts.pop
-        _firstname  = _name_parts.join " "
-      end
+    def get_names(address)
+      name_parts = address["name"]["full"].split(" ")
 
-      # create new address
-      _spree_address = Spree::Address.new(
-        city:       affirm_address["address"]["city"],
-        phone:      affirm_address["phone_number"],
-        zipcode:    affirm_address["address"]["postal_code"],
-        address1:   affirm_address["address"]["street1"],
-        address2:   affirm_address["address"]["street2"],
-        state:      _state,
-        country:    _country,
-        lastname:   _lastname,
-        firstname:  _firstname
+      lastname  = address["name"]["last"] || name_parts.pop
+      firstname = address["name"]["first"] || name_parts.join(" ")
+
+      [firstname, lastname]
+    end
+
+    def generate_spree_address(address)
+      country = find_country(address)
+      state   = find_state(address)
+      firstname, lastname = get_names(address)
+
+      address = Spree::Address.create(
+        city:       address["address"]["city"],
+        phone:      address["phone_number"],
+        zipcode:    address["address"]["postal_code"],
+        address1:   address["address"]["street1"],
+        address2:   address["address"]["street2"],
+        state:      state,
+        country:    country,
+        lastname:   lastname,
+        firstname:  firstname
       )
 
-      _spree_address.save
-      _spree_address
+      address
     end
   end
 end
+
+
